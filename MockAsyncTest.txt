@@ -1,0 +1,2758 @@
+package com.platformx.accounts.start;
+
+import static com.platformx.accounts.start.LandingSequenceConstants.Logout_Reason_Attribute_name;
+import static com.platformx.accounts.usersession.CustomerAttributes.LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME;
+import static com.platformx.mwf.webappsupport.devicedetection.Constants.DeviceDetection_Session_Attribute_Name;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import javax.servlet.ServletContext;
+import javax.servlet.ServletContextEvent;
+import javax.servlet.http.Cookie;
+
+import org.junit.Before;
+import org.junit.BeforeClass;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Matchers;
+import org.mockito.Mock;
+import org.mockito.Mockito;
+import org.mockito.Spy;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.runners.MockitoJUnitRunner;
+import org.mockito.stubbing.Answer;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.support.GenericBeanDefinition;
+import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.mock.web.MockServletContext;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.servlet.ModelAndView;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.classic.spi.LoggingEvent;
+import ch.qos.logback.core.Appender;
+
+import com.platformx.accounts.common.factory.DeviceInfoFactory;
+import com.platformx.accounts.common.factory.InboundNavigationResponseTOFactory;
+import com.platformx.accounts.common.factory.InterruptiveMessageTOFactory;
+import com.platformx.accounts.common.factory.SetupOnlineBankingResponseTOFactory;
+import com.platformx.accounts.common.util.CommonCodeUtilAccounts;
+import com.platformx.accounts.domain.MyplatformxSessionSetupException;
+import com.platformx.accounts.edocs.common.EDocsConstants;
+import com.platformx.accounts.framework.BaseServices;
+import com.platformx.accounts.framework.BusinessServices;
+import com.platformx.accounts.framework.DomainServices;
+import com.platformx.accounts.framework.PresentationServices;
+import com.platformx.accounts.im.InterruptiveMessageService;
+import com.platformx.accounts.usersession.CustomerAttributes;
+import com.platformx.isg.saml.api.AssertionProviderFactory;
+import com.platformx.isg.saml.api.SSOConstants;
+import com.platformx.mwf.appcommon.EnhancedException;
+import com.platformx.mwf.appcommon.EnhancedException.EnhancedExceptionDetail;
+import com.platformx.mwf.cif.framework.CifInitializerFinalizer;
+import com.platformx.mwf.cif.framework.SpringFrameworkBasedServletContextProvider;
+import com.platformx.mwf.imf.framework.model.content.ContentFinderNew;
+import com.platformx.mwf.imf.framework.model.type.ImType;
+import com.platformx.mwf.imf.framework.model.view.InterruptiveMessageTO;
+import com.platformx.mwf.primitives.device.DeviceInfo;
+import com.platformx.mwf.saml.inbound.InBoundNavigationService;
+import com.platformx.mwf.saml.inbound.to.InboundNavigationRequestTO;
+import com.platformx.mwf.saml.inbound.to.InboundNavigationResponseTO;
+import com.platformx.mwf.saml.inbound.to.TrackingDetailsTO;
+import com.platformx.mwf.testingframework.springframework.CleverApplicationContext;
+import com.platformx.mwf.webappsupport.devicedetection.Device;
+import com.platformx.mwf.webappsupport.devicedetection.Device.DEVICE_CLASS;
+import com.platformx.mwf.webappsupport.inlanguage.facilities.InLanguageUtil;
+import com.platformx.secure.connect.bev.BusinessEventManager;
+import com.platformx.secure.connect.bev.EventRegistry;
+import com.platformx.secure.connect.bev.builder.BusinessEventBuilder;
+
+/**
+ * Platform-X WB tests for {@link LandingController}
+ * 
+ * @author Tinu Chand
+ */
+@RunWith(MockitoJUnitRunner.class)
+public class LandingControllerTest {
+
+	private static CleverApplicationContext applicationContext;
+
+	// private static ApplicationContext applicationContext;
+	private MockServletContext servletContext;
+	DomainServices businessServices;
+	private MockHttpServletRequest request;
+	private MockHttpServletResponse response;
+	static LandingController controller;
+	private static DomainServices domainService;
+	private static BusinessServices businessService;
+	InboundNavigationResponseTO inboundNavigationResponseTO;
+	@Spy
+	private ExecutorService businessEventThreadPoolExecutor = Executors
+			.newFixedThreadPool(1);
+	@Mock
+	ServletContextEvent mockEvent;
+	@Mock
+	ServletContext mockServletContext;
+	// Iterate logging events to filter only info messages of BEV events
+	private List<String> filteredLoggingEvents = new ArrayList<String>();
+	@Mock
+	WebApplicationContext mockWebContext;
+
+	private GenericApplicationContext mockContext;
+
+	@BeforeClass
+	public static void setUpBeforeClass() throws Exception {
+		System.setProperty("mwf.fico.reloadIntervalUnit", "HOURS");
+		System.setProperty("mwf.bevevent.publishSwitch", "false");
+		try {
+			applicationContext = new CleverApplicationContext(
+					new String[] {
+							"classpath:META-INF/accounts-business-mock.xml",
+							"classpath:META-INF/accounts-presentation-mock.xml",
+							"classpath:META-INF/accounts-integration-mock.xml",
+							"classpath:META-INF/mwf-business-accountinquirymapper-mock.xml",
+							"classpath:META-INF/cif-default-core-mock.xml",
+							"classpath:META-INF/accounts-cif-integration-mock.xml",
+							"classpath:META-INF/accounts-presentation-landing-steps.xml",
+							"classpath:META-INF/accounts-interruptive-suppress-entries.xml" });
+
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+
+		domainService = (DomainServices) applicationContext
+				.getBean("domainServices");
+		businessService = (BusinessServices) applicationContext
+				.getBean("businessServices");
+
+	}
+
+	/**
+	 * Initialize Http objects
+	 */
+	@Before
+	public void initHttpObjects() throws Exception {
+
+		request = new MockHttpServletRequest();
+		request.clearAttributes();
+		request.getSession();
+		servletContext = new MockServletContext();
+		servletContext.setContextPath("/accounts");
+		WebApplicationContext mockWebApplicationContext = Mockito
+				.mock(WebApplicationContext.class);
+
+		servletContext.setAttribute(
+				WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE,
+				mockWebApplicationContext);
+
+		CommonCodeUtilAccounts.loadAllProperties();
+		new CifInitializerFinalizer()
+				.contextInitialized(new ServletContextEvent(servletContext));
+		mockContext = new GenericApplicationContext();
+		GenericBeanDefinition genericBeanDefinition = new GenericBeanDefinition();
+
+		genericBeanDefinition
+				.setBeanClass(SpringFrameworkBasedServletContextProvider.class);
+		genericBeanDefinition.setScope("prototype");
+		mockContext.registerBeanDefinition(
+				"springFrameworkBasedServletContextProvider",
+				genericBeanDefinition);
+		mockContext.refresh();
+
+		response = new MockHttpServletResponse();
+	}
+
+	/**
+	 * <p>
+	 * Summary : This test checks if the programs throws the message 'Forced
+	 * logging off as no Customer session established yet. This should not
+	 * happen. Security Check should verify this' - when the Assertion Provider
+	 * is unavailable and if no customer session has been established.
+	 * </p>
+	 * 
+	 * @input - No AssertionProvider object has been passed
+	 * @output -1. Console message 'Forced logging off as no Customer session
+	 *         established yet. This should not happen. Security Check should
+	 *         verify this' should be printed 2. Model should be an empty map 3.
+	 *         View should be 'Logout_Forward_View' Document Reference :<Need to
+	 *         update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/18/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_AssertionProviderEmpty_NoCustomerSession_InboundNavigationResponseTO_null_NoFeaturesCookie()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		// Mock InBoundNavigationService
+		inboundNavigationResponseTO = null;
+		InBoundNavigationService inBoundNavigationService = Mockito
+				.mock(InBoundNavigationService.class);
+		applicationContext.overrideBean("inBoundService",
+				inBoundNavigationService);
+		Mockito.when(
+				inBoundNavigationService.buildNavigation(Matchers
+						.any(InboundNavigationRequestTO.class))).thenReturn(
+				inboundNavigationResponseTO);
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// To check the model and view, and reason
+		Map<String, Object> model = modelAndView.getModel();
+		String view = modelAndView.getViewName();
+		String reason = (String) request
+				.getAttribute(LandingSequenceConstants.Logout_Reason_Attribute_name);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// Model should be an empty map
+		assertEquals(model, Collections.EMPTY_MAP);
+
+		// View should be 'Logout_Forward_View'
+		assertEquals(view, LandingSequenceConstants.Logout_Forward_View);
+
+		// Request attribute should have the Logout_Reason_Attribute_name set as
+		// 'Security_Violation'
+		assertEquals(reason, "Security_Violation");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : This is the go_Good test case
+	 * </p>
+	 * 
+	 * @input - AssertionProvider and DeviceDetection_Session_Attribute_Name has
+	 *        been input to the test.Also have set up Online Banking Session,
+	 *        and SPLASH is ENABLED,and mocked required classes.
+	 * @output -1. modelAndView should not be null 2. View name should be
+	 *         "startview" Document Reference
+	 *         :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/19/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_goGood() throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("features_cookie", "features_cookie_value");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+		// Mock InBoundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be "startview"
+		assertEquals(modelAndView.getViewName(), "startview");
+	}
+
+	/**
+	 * <p>
+	 * Summary : Checks if the view is populated correctly for the
+	 * ImType_COLLECTION,and if customer is Eligible for CollectionSplash
+	 * </p>
+	 * 
+	 * @input - ImType is set as COLLECTION
+	 * @output -1.modelAndView should not be null 2.view name should be
+	 *         "forward:/exit/saml;identifier=collectionMakePaymentCustomerLevel;destPageId=;context=collection_splash_sign_on;accountId=WB_Test_delinquentAccID;interruptiveCollectionContentID=terms_and_conditions"
+	 *         Document Reference :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/23/2016
+	 * 
+	 */
+
+	@SuppressWarnings({ "unchecked", "unused" })
+	// @Ignore
+	@Test
+	public void testStart_ImType_COLLECTION() throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("features_cookie", "features_cookie_value");
+
+		request.setCookies(cookies);
+
+		// Mocking CustomerAttributes
+		CustomerAttributes customerAttributes = Mockito
+				.mock(CustomerAttributes.class);
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME, customerAttributes);
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mocking EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(false);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock InterruptiveMessageService
+		InterruptiveMessageTO interruptiveMessageTO = InterruptiveMessageTOFactory
+				.buildInterruptiveMessageTO(ImType.COLLECTION,
+						"terms_and_conditions");
+		// InterruptiveMessageService mock responses
+		InterruptiveMessageService intSvc = Mockito
+				.mock(InterruptiveMessageService.class);
+		applicationContext.overrideBean(InterruptiveMessageService.INT_MSG_SVC,
+				intSvc);
+		Mockito.when(
+				intSvc.calculateSplash(Matchers.any(Map.class),
+						Matchers.any(ContentFinderNew.class),
+						Matchers.any(Device.class),
+						Matchers.any(DomainServices.class))).thenReturn(
+				interruptiveMessageTO);
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be
+		// "forward:/exit/saml;identifier=collectionMakePaymentCustomerLevel;destPageId=;context=collection_splash_sign_on;accountId=WB_Test_delinquentAccID;interruptiveCollectionContentID=terms_and_conditions"
+		String viewName = LandingSequenceConstants.COLLECTION_PAYMENT_FORWARD_VIEW
+				+ interruptiveMessageTO.getDelinquentAccID()
+				+ ";interruptiveCollectionContentID="
+				+ interruptiveMessageTO.getContentId();
+		assertEquals(
+				"forward:/exit/saml;identifier=collectionMakePaymentCustomerLevel;destPageId=;context=collection_splash_sign_on;accountId=WB_Test_delinquentAccID;interruptiveCollectionContentID=terms_and_conditions",
+				modelAndView.getViewName());
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : Checks if No splash is displayed when the CMS is down
+	 * </p>
+	 * 
+	 * @input - Set the interruptiveMessageTO.setContentId() as Null, ie no
+	 *        content ID is provided.
+	 * @output -1. modelAndView should not be null 2. view name should be
+	 *         startview Document Reference :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/24/2016
+	 * 
+	 */
+
+	@SuppressWarnings("unchecked")
+	// @Ignore
+	@Test
+	public void testStart_CMS_Down() throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("features_cookie", "features_cookie_value");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock InterruptiveMessageService, set contentID as null
+		InterruptiveMessageTO interruptiveMessageTO = InterruptiveMessageTOFactory
+				.buildInterruptiveMessageTO(ImType.SERVICE, null);
+		InterruptiveMessageService intSvc = Mockito
+				.mock(InterruptiveMessageService.class);
+		applicationContext.overrideBean(InterruptiveMessageService.INT_MSG_SVC,
+				intSvc);
+		Mockito.when(
+				intSvc.calculateSplash(Matchers.any(Map.class),
+						Matchers.any(ContentFinderNew.class),
+						Matchers.any(Device.class),
+						Matchers.any(DomainServices.class))).thenReturn(
+				interruptiveMessageTO);
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be startview
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : No NewOnlineBankingSession present in
+	 * SetupOnlineBankingResponseTO
+	 * </p>
+	 * 
+	 * @input - Set NewOnlineBankingSession to False while mocking
+	 *        SetupOnlineBankingResponseTO.
+	 * @output -1. modelAndView should not be null 2. view name should be
+	 *         "forward:/contents/splash/marketing/splash1" Document Reference
+	 *         :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/24/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_NewOnlineBankingSession_False() throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies - CHECK
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("features_cookie", "features_cookie_value");
+
+		request.setCookies(cookies);
+
+		CustomerAttributes customerAttributes = Mockito
+				.mock(CustomerAttributes.class);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME, customerAttributes);
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+		// request.setParameter("SAMLart",
+		// LandingSequenceConstants.Saml_Artifact_Parameter_Name);
+		Mockito.when(customerAttributes.getOriginationGroup())
+				.thenReturn("wib");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(false);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be "forward:/contents/splash/marketing/splash1"
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : No splash is to be displayed when the DEVICE_CLASS is set as
+	 * SEVENMINUS
+	 * </p>
+	 * 
+	 * @input - Feature cookie is not present,DEVICE_CLASS is given as
+	 *        SEVENMINUS and SecondEntrytoApp cookie is present.
+	 * @output -1. modelAndView should not be null 2. view name should be
+	 *         startview. Document Reference :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/24/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_FeaturesCookie_Null_DEVICE_CLASS_SEVENMINUS_SecondEntrytoApp_Present()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies - no feature cookie is set
+		Cookie[] cookies = new Cookie[2];
+		// this means that user is not coming to this version of app for the
+		// first time
+		cookies[0] = new Cookie("version_cookie", "4.15");
+		cookies[1] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENMINUS, "Mobile Phone"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		System.out.println("model map " + modelAndView.getModelMap());
+		System.out.println("model " + modelAndView.getModel());
+		System.out.println("view " + modelAndView.getView());
+		System.out.println("view name " + modelAndView.getViewName());
+		System.out.println("(modelAndView.getModelMap().get(0)"
+				+ modelAndView.getModelMap().get(0));
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be startview
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : Bug - Null pointer exception is fired when the Current App
+	 * Version is null
+	 * </p>
+	 * 
+	 * @input - Set currentServerAppVersion as null
+	 * @output - Null pointer should be fired and handled gracefully, but its
+	 *         not handled in the code - hence bug. Document Reference :Raised
+	 *         Defect #ISG09030344
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/29/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_Cookies_Present_CurrentAppVersion_Null()
+			throws Exception {
+
+		System.clearProperty("mwf.account.tablet.featuresversion");
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create cookies
+		Cookie[] cookies = new Cookie[3];
+		cookies[0] = new Cookie("features_cookie", "1=2.15.1$$0=2.15.1");
+		cookies[1] = new Cookie("version_cookie", "3.15.1");
+		cookies[2] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		ModelAndView modelAndView = null;
+
+		// Fire the request
+		try {
+			modelAndView = controller.start(request, response);
+
+			// -------------------Assert the
+			// outputs----------------------------------
+
+			// modelandView should not be null
+			assertNotNull(modelAndView);
+		}
+
+		catch (NullPointerException e) {
+			fail("'testStart_Cookies_Present_CurrentAppVersion_Null' should have gracefully handled the Null Pointer Exception instead of calling this fail assertion");
+
+		}
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : Bug - Null pointer exception is fired when the
+	 * SetupOnlineBankingResponseTO is null
+	 * </p>
+	 * 
+	 * @input - Set SetupOnlineBankingResponseTO as null
+	 * @output - Null pointer should be fired and handled gracefully, but its
+	 *         not handled in the code - hence bug. Document Reference :<Inform
+	 *         Dev Team>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/29/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_SetupOnlineBankingResponseTO_Null() throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("features_cookie", "features_cookie_value");
+
+		request.setCookies(cookies);
+
+		CustomerAttributes customerAttributes = Mockito
+				.mock(CustomerAttributes.class);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME, customerAttributes);
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		Mockito.when(customerAttributes.getOriginationGroup())
+				.thenReturn("wib");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = null;
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		ModelAndView modelAndView = null;
+		try {
+			// Fire the request
+			modelAndView = controller.start(request, response);
+
+			// -------------------Assert the
+			// outputs----------------------------------
+
+			// modelandView should not be null
+			assertNotNull(modelAndView);
+		}
+
+		catch (NullPointerException e) {
+			fail("'testStart_SetupOnlineBankingResponseTO_Null()' should have gracefully handled the Null Pointer Exception instead of calling this fail assertion");
+
+		}
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : Upgrade Entry Splash should not be displayed
+	 * </p>
+	 * 
+	 * @input - Feature cookie,VersionCookie and SecondEntrytoAppPresent are
+	 *        present. Current App Version = 3.15.1 and
+	 *        lastVisitedServerAppVersion is 2.15.1,Customer not from WIB.
+	 *        Setting the InterruptiveMessageTO as null, so that the response to
+	 *        calculateSplash(in InterruptiveMessageService) would be null.
+	 * @output - View name should be "startview" Document Reference :<Need to
+	 *         update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/25/2016
+	 * 
+	 */
+
+	@SuppressWarnings("unchecked")
+	// @Ignore
+	@Test
+	public void testStart_VersionCookie_SameAsCurrentAppVersion_secondEntrytoAppPresent_Not_wib_DEVICE_CLASS_SEVENPLUS_NoUpgradeSplash()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[3];
+		cookies[0] = new Cookie("features_cookie", "1=2.15.1$$0=2.15.1");
+		cookies[1] = new Cookie("version_cookie", "3.15.1");
+		cookies[2] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// InterruptiveMessageService mock response to null, so that
+		// calculateSplash(in InterruptiveMessageService) would be null.
+		InterruptiveMessageTO interruptiveMessageTO = null;
+		InterruptiveMessageService intSvc = Mockito
+				.mock(InterruptiveMessageService.class);
+		// intSvc.setDomainServices(businessServices);
+		applicationContext.overrideBean(InterruptiveMessageService.INT_MSG_SVC,
+				intSvc);
+		Mockito.when(
+				intSvc.calculateSplash(Matchers.any(Map.class),
+						Matchers.any(ContentFinderNew.class),
+						Matchers.any(Device.class),
+						Matchers.any(DomainServices.class))).thenReturn(
+				interruptiveMessageTO);
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be "startview"
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : Upgrade Entry Splash is to be displayed
+	 * </p>
+	 * 
+	 * @input - Feature cookie,VersionCookie and SecondEntrytoAppPresent are
+	 *        present. Current App Version = 3.15.1 and
+	 *        lastVisitedServerAppVersion is 2.15.1,Customer not from WIB
+	 * @output - View name should be
+	 *         "forward:/contents/splash/marketing/splash1" Document Reference
+	 *         :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/25/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_VersionCookie_NotSameAsCurrentAppVersion_secondEntrytoAppPresent_Not_wib_DEVICE_CLASS_SEVENPLUS_UpgradeSplash()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[3];
+		cookies[0] = new Cookie("features_cookie", "1=2.15.1$$0=2.15.1");
+		cookies[1] = new Cookie("version_cookie", "2.15.1");
+		cookies[2] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+		// request.setParameter("SAMLart",
+		// LandingSequenceConstants.Saml_Artifact_Parameter_Name);
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be "forward:/contents/splash/marketing/splash1"
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : No Upgrade Splash to be displayed when the DEVICE_CLASS is
+	 * SEVENMINUS
+	 * </p>
+	 * (LandingController.getInterruptiveMessageId splash is not enabled as
+	 * pushShowFlag or newAppVersionFlag flag is being set as true)
+	 * 
+	 * @input - Feature cookie is present,VersionCookie and
+	 *        SecondEntrytoAppPresent are not present. Current App Version =
+	 *        4.15 and lastVisitedServerAppVersion is 3.15,Customer not from WIB
+	 * @output - View name should be "startview" Document Reference :<Need to
+	 *         update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/25/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_VersionCookie_and_secondEntrytoApp_NOTPresent_Not_wib_DEVICE_CLASS_SEVENMINUS_NoUpgradeSplash()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[1];
+		cookies[0] = new Cookie("features_cookie", "1=3.15$$0=3.15");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENMINUS, "Mobile Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+		// request.setParameter("SAMLart",
+		// LandingSequenceConstants.Saml_Artifact_Parameter_Name);
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be "startview"
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : Upgrade Splash should not be displayed???Need to check!
+	 * </p>
+	 * 
+	 * @input - Feature cookie,VersionCookie and SecondEntrytoAppPresent are
+	 *        present. Current App Version = 4.15 and
+	 *        lastVisitedServerAppVersion is 3.15,Customer not from WIB
+	 * @output - View name should be
+	 *         "forward:/contents/splash/marketing/splash1" Document Reference
+	 *         :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/25/2016
+	 * 
+	 */
+	/* TODO: Need to debug and confirm with Sangeetha Team the scenario */
+
+	@Test
+	public void testStart_VersionCookie_NotNull_secondEntrytoAppPresent_Not_wib_DEVICE_CLASS_SEVENMINUS_NoUpgradeSplash()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[3];
+		cookies[0] = new Cookie("features_cookie", "1=3.15$$0=3.15");
+		cookies[1] = new Cookie("version_cookie", "4.15");
+		cookies[2] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENMINUS, "Mobile Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+		// view name should be "forward:/contents/splash/marketing/splash1"
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : No Upgrade??? Need to check!
+	 * </p>
+	 * 
+	 * @input - Feature cookie,VersionCookie and SecondEntrytoAppPresent are
+	 *        present. Current App Version = 3.15.1 and
+	 *        lastVisitedServerAppVersion is 3.15.1,Customer not from WIB
+	 * @output - View name should be
+	 *         "forward:/contents/splash/marketing/splash1" Document Reference
+	 *         :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/25/2016
+	 * 
+	 */
+	/* TODO: Need to debug and confirm the scenario */
+
+	// @Ignore
+	@Test
+	public void testStart_VersionCookie_NotNull_secondEntrytoAppPresent_Not_wib_SameVersions_NoUpgradeSplash()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[3];
+		cookies[0] = new Cookie("features_cookie", "1=3.15.1$$0=3.15.1");
+		cookies[1] = new Cookie("version_cookie", "3.15.1");
+		cookies[2] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be "forward:/contents/splash/marketing/splash1"
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary :No Upgrade Splash is to be displayed when the Verson cookie is
+	 * same as Current App Version
+	 * </p>
+	 * 
+	 * @input - Feature cookie,VersionCookie and SecondEntrytoAppPresent are
+	 *        present. Current App Version = 3.15.1 and
+	 *        lastVisitedServerAppVersion is 2.15.1,Customer from WIB
+	 * @output - View name should be "startview" Document Reference :<Need to
+	 *         update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 03/01/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_VersionCookie_NotNull_secondEntrytoAppPresent_WIB_NoUpgradeSplash()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[3];
+		cookies[0] = new Cookie("features_cookie", "1=2.15.1$$0=2.15.1");
+		cookies[1] = new Cookie("version_cookie", "3.15.1");
+		cookies[2] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InBoundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		// Mocking the InBoundNavigationService, and setting the mocked response
+		// to InboundNavigationResponseTO
+		inboundNavigationResponseTO = InboundNavigationResponseTOFactory
+				.buildInboundNavigationResponseTO_wib(deviceInfo);
+		InBoundNavigationService inBoundNavigationService = Mockito
+				.mock(InBoundNavigationService.class);
+		applicationContext.overrideBean("inBoundService",
+				inBoundNavigationService);
+		Mockito.when(
+				inBoundNavigationService.buildNavigation(Matchers
+						.any(InboundNavigationRequestTO.class))).thenReturn(
+				inboundNavigationResponseTO);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be startview
+		assertEquals(modelAndView.getViewName(), "startview");
+		assertEquals(
+				modelAndView
+						.getModelMap()
+						.get(LandingSequenceConstants.Mobile_Banking_Enrolled_Flag_Attribute_Name),
+				responseTO.isMobileBankingEnrolled());
+		assertEquals(
+				modelAndView
+						.getModelMap()
+						.get(LandingSequenceConstants.INBOUND_SAML_ORIGINATION_GROUP),
+				inboundNavigationResponseTO.getSamlInBoundOriginationGroup());
+		assertEquals(
+				modelAndView.getModelMap().get(
+						LandingSequenceConstants.NEW_APP_VERSION_FLAG), false);
+		assertEquals(
+				modelAndView.getModelMap().get(
+						LandingSequenceConstants.PUSH_FLAG), false);
+		assertEquals(
+				modelAndView.getModelMap().get(
+						LandingSequenceConstants.NO_ACCOUNTS_FLAG),
+				!responseTO.isAccountsAvailable());
+
+	}
+
+	/**
+	 * 
+	 * <p>
+	 * Summary :Test to check for exception
+	 * </p>
+	 * 
+	 * @input - Mock setupOnlineBankingSession.setup() to return
+	 *        MyplatformxSessionSetupException(Enhanced Exception)
+	 * @output - MyplatformxSessionSetupException(Enhanced Exception) should be
+	 *         thrown Document Reference :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 03/01/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart__MyplatformxSessionSetupExceptionCheck()
+			throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+		// request.setParameter("SAMLart",
+		// LandingSequenceConstants.Saml_Artifact_Parameter_Name);
+
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingResponseTO responseTO
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenThrow(
+				new MyplatformxSessionSetupException("failed"));
+
+		/* ************* fire request ************** */
+
+		ModelAndView modelAndView = controller.start(request, response);
+
+		/* ************* validation ************** */
+
+		assertNotNull(modelAndView);
+
+	}
+
+	/**
+	 * 
+	 * <p>
+	 * Summary :Test to check for exception
+	 * </p>
+	 * 
+	 * @input - Mock setupOnlineBankingSession.setup() to return
+	 *        MyplatformxSessionSetupException(Enhanced Exception)
+	 * @output - MyplatformxSessionSetupException(Enhanced Exception) should be
+	 *         thrown Document Reference :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 03/01/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart__MyplatformxSessionSetupExceptionCheck_WithErroCode_ERR_MWF_200_0006()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+		// request.setParameter("SAMLart",
+		// LandingSequenceConstants.Saml_Artifact_Parameter_Name);
+
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingResponseTO responseTO
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		EnhancedExceptionDetail exception = new MyplatformxSessionSetupException.EnhancedExceptionDetail(
+				"ERR_MWF_200_0006", "failed");
+		MyplatformxSessionSetupException myplatformxSetupException = new MyplatformxSessionSetupException(
+				"failed");
+		myplatformxSetupException.addErrorDetail(exception);
+
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenThrow(
+				myplatformxSetupException);
+
+		/* ************* fire request ************** */
+
+		ModelAndView modelAndView = controller.start(request, response);
+
+		/* ************* validation ************** */
+		assertNotNull(modelAndView);
+		assertEquals("Missing_Accounts_Info_From_SORs",
+				request.getAttribute(Logout_Reason_Attribute_name));
+
+	}
+
+	/**
+	 * 
+	 * <p>
+	 * Summary :Test to check for exception
+	 * </p>
+	 * 
+	 * @input - Mock setupOnlineBankingSession.setup() to return
+	 *        MyplatformxSessionSetupException(Enhanced Exception)
+	 * @output - MyplatformxSessionSetupException(Enhanced Exception) should be
+	 *         thrown Document Reference :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 03/01/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart__MyplatformxSessionSetupExceptionCheck_WithErroCode_ERR_MWF_200_0010()
+			throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+		// request.setParameter("SAMLart",
+		// LandingSequenceConstants.Saml_Artifact_Parameter_Name);
+
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingResponseTO responseTO
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		EnhancedExceptionDetail exception = new MyplatformxSessionSetupException.EnhancedExceptionDetail(
+				"ERR_MWF_200_0010", "failed");
+		MyplatformxSessionSetupException myplatformxSetupException = new MyplatformxSessionSetupException(
+				"failed");
+		myplatformxSetupException.addErrorDetail(exception);
+
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenThrow(
+				myplatformxSetupException);
+
+		/* ************* fire request ************** */
+
+		ModelAndView modelAndView = controller.start(request, response);
+
+		/* ************* validation ************** */
+		assertNotNull(modelAndView);
+		assertEquals("Missing_Accounts_Info_From_SORs",
+				request.getAttribute(Logout_Reason_Attribute_name));
+
+	}
+
+	/**
+	 * 
+	 * <p>
+	 * Summary :Test to check for exception
+	 * </p>
+	 * 
+	 * @input - Mock setupOnlineBankingSession.setup() to return
+	 *        MyplatformxSessionSetupException(Enhanced Exception)
+	 * @output - MyplatformxSessionSetupException(Enhanced Exception) should be
+	 *         thrown Document Reference :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 03/01/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart__MyplatformxSessionSetupExceptionCheck_WithErroCode_ERR_MWF_200_0003()
+			throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("secondEntrytoApp", "SecondTimeUser");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+		// request.setParameter("SAMLart",
+		// LandingSequenceConstants.Saml_Artifact_Parameter_Name);
+
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingResponseTO responseTO
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		EnhancedExceptionDetail exception = new MyplatformxSessionSetupException.EnhancedExceptionDetail(
+				"ERR_MWF_200_0003", "failed");
+		MyplatformxSessionSetupException myplatformxSetupException = new MyplatformxSessionSetupException(
+				"failed");
+		myplatformxSetupException.addErrorDetail(exception);
+
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenThrow(
+				myplatformxSetupException);
+
+		/* ************* fire request ************** */
+
+		ModelAndView modelAndView = controller.start(request, response);
+
+		/* ************* validation ************** */
+
+		assertNotNull(modelAndView);
+		assertEquals("Missing_Accounts_Info_From_SORs",
+				request.getAttribute(Logout_Reason_Attribute_name));
+
+	}
+
+	/**
+	 * 
+	 * <p>
+	 * Summary :No request has been provided,exception should be handled
+	 * gracefully- but Null Pointer Exception is fired - bug
+	 * </p>
+	 * 
+	 * @input - Request not available, and is set as null
+	 * @output -Null pointer Exception should be handled gracefully, but its not
+	 *         - hence bug. Document Reference :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 03/01/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_HttpServletRequest_Null() throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		ModelAndView modelAndView = null;
+
+		// Fire the request
+		try {
+			modelAndView = controller.start(null, response);
+
+			// -------------------Assert the
+			// outputs----------------------------------
+
+			// modelandView should not be null
+			assertNotNull(modelAndView);
+		}
+
+		catch (NullPointerException e) {
+			// fail("'testStart_NoSession()' should have gracefully handled the Null Pointer Exception instead of calling this fail assertion");
+
+		}
+	}
+
+	/**
+	 * 
+	 * <p>
+	 * Summary :No session has been provided,exception should be handled
+	 * gracefully- but Null Pointer Exception is fired - bug
+	 * </p>
+	 * 
+	 * @input - Session not available
+	 * @output -Null pointer Exception should be handled gracefully, but its not
+	 *         - hence bug. Document Reference :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 03/01/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_DeviceDetection_Session_Attribute_Name_Unavailable()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// Set request attributes
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		// request.setAttribute(DeviceDetection_Session_Attribute_Name, new
+		// Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		ModelAndView modelAndView = null;
+
+		// Fire the request
+		try {
+			modelAndView = controller.start(request, response);
+
+			// -------------------Assert the
+			// outputs----------------------------------
+
+			// modelandView should not be null
+			assertNotNull(modelAndView);
+		}
+
+		catch (NullPointerException e) {
+			fail("'testStart_DeviceDetection_Session_Attribute_Name_Null()' should have gracefully handled the Null Pointer Exception instead of calling this fail assertion");
+
+		}
+	}
+
+	/**
+	 * 
+	 * <p>
+	 * Summary :Test to check for exception ??? Need to check
+	 * </p>
+	 * 
+	 * @input - Mock setupOnlineBankingSession.setup() to return Enhanced
+	 *        Exception
+	 * @output - Enhanced Exception should be thrown Document Reference :<Need
+	 *         to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 03/01/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_EnhancedExceptionCheck() throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// Set request attributes
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock SetupOnlineBankingResponseTO responseTO
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenThrow(
+				new MyplatformxSessionSetupException("failed"));
+
+		/* ************* fire request ************** */
+
+		ModelAndView modelAndView = controller.start(request, response);
+
+		/* ************* validation ************** */
+
+		assertNotNull(modelAndView);
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : No splash is to be displayed when the dskelgCookie is set
+	 * </p>
+	 * 
+	 * @input - Have set dskelgCookie, and have set the value to the request
+	 *        attribute
+	 * @output -No splash is to displayed. 1.modelAndView should not be null
+	 *         2.view name should be "startview" Document Reference :<Need to
+	 *         update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/29/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_dskelgCookie_present() throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("DSKELG", "DSKELG");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be startview
+		assertEquals(modelAndView.getViewName(), "startview");
+	}
+
+	/**
+	 * <p>
+	 * Summary:Splash should not be displayed when the SPLASH_ENABLED is not set
+	 * in the request attribute
+	 * </p>
+	 * 
+	 * @input - Have not set SPLASH_ENABLED in the request attribute
+	 * @output -No splash is to displayed. 1.modelAndView should not be null
+	 *         2.view name should be "startview" Document Reference :<Need to
+	 *         update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/29/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_SPLASH_NOT_ENABLED() throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[1];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock InboundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be startview
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : Device Info and Cookies are passed in as Null,splash is to be
+	 * displayed ??? Need to check!
+	 * </p>
+	 * 
+	 * @input - Device Info and Cookies are Null
+	 * @output - 1.modelAndView should not be null 2.View name should be
+	 *         "forward:/contents/splash/marketing/splash1" Document Reference
+	 *         :<Need to update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 02/29/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_Device_Info_Null_CookieNull() throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.mock(EventRegistry.class);
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+
+		// Mock mockInboundNavigationService
+		DeviceInfo deviceInfo = null;
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock InterruptiveMessageService
+		// mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view should be forward:/contents/splash/marketing/splash1
+		assertEquals(modelAndView.getViewName(), "startview");
+
+	}
+
+	/**
+	 * <p>
+	 * Summary : This test checks if the programs throws the message 'Forced
+	 * logging off as no Customer session established yet. This should not
+	 * happen. Security Check should verify this' - when the Assertion Provider
+	 * is unavailable and if no customer session has been established.
+	 * </p>
+	 * 
+	 * @input - No AssertionProvider object has been passed,Set
+	 *        request.setParameter("SAMLart",
+	 *        LandingSequenceConstants.Saml_Artifact_Parameter_Name)
+	 * @output -1. Console message 'Forced logging off as no Customer session
+	 *         established yet. This should not happen. Security Check should
+	 *         verify this' should be printed 2. Model should be an empty map 3.
+	 *         View should be 'Logout_Forward_View' Document Reference :<Need to
+	 *         update>
+	 * @author - Tinu Chand
+	 * @throws Exception
+	 * @date - 03/01/2016
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_AssertionProviderEmpty_NoCustomerSession_InboundNavigationResponseTO_null_setSAMLart()
+			throws Exception {
+
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		request.setParameter("SAMLart",
+				LandingSequenceConstants.Saml_Artifact_Parameter_Name);
+
+		// Mock InBoundNavigationService
+		inboundNavigationResponseTO = null;
+		InBoundNavigationService inBoundNavigationService = Mockito
+				.mock(InBoundNavigationService.class);
+		applicationContext.overrideBean("inBoundService",
+				inBoundNavigationService);
+		Mockito.when(
+				inBoundNavigationService.buildNavigation(Matchers
+						.any(InboundNavigationRequestTO.class))).thenReturn(
+				inboundNavigationResponseTO);
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// To check the model and view, and session issue
+		Map<String, Object> model = modelAndView.getModel();
+		String view = modelAndView.getViewName();
+		String reason = (String) request
+				.getAttribute(LandingSequenceConstants.Logout_Reason_Attribute_name);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// Model should be an empty map
+		assertEquals(model, Collections.EMPTY_MAP);
+
+		// View should be 'Logout_Forward_View'
+		assertEquals(view, LandingSequenceConstants.Logout_Forward_View);
+
+		// Request attribute should have the Logout_Reason_Attribute_name set as
+		// 'Security_Violation'
+		assertEquals(reason, "Security_Violation");
+
+	}
+	/**
+	 * <p>
+	 * Summary : This is the go_Good test case for validating BEV 28 Event
+	 * </p>
+	 * 
+	 * @input - AssertionProvider and DeviceDetection_Session_Attribute_Name has
+	 *        been input to the test.Also have set up Online Banking Session,
+	 *        and SPLASH is ENABLED,and mocked required classes.
+	 * @output -1. modelAndView should not be null 2. View name should be
+	 *         "startview" Document Reference
+	 *         :<Need to update>
+	 * @author - Karthiga Baskaran
+	 * @throws Exception
+	 * @date - 04/03/2017
+	 * 
+	 */
+
+	// @Ignore
+	@Test
+	public void testStart_gogood_BEV28() throws Exception {
+		// Build Controller Object and inject it's dependencies
+		LandingController controller = buildLandingController();
+
+		CommonCodeUtilAccounts.createMockOlbSession(applicationContext,
+				domainService, businessService);
+
+		// Create dummy OLB session
+		// Initializer.initializeOLBSession(businessService);
+
+		// create factory cookies
+		Cookie[] cookies = new Cookie[2];
+		cookies[0] = new Cookie("version_cookie", "version_cookie_value");
+		cookies[1] = new Cookie("features_cookie", "features_cookie_value");
+
+		request.setCookies(cookies);
+
+		request.getSession().setAttribute(SSOConstants.ASSERTION_PROVIDER,
+				AssertionProviderFactory.getInstance("accountsapp"));
+		request.setAttribute(DeviceDetection_Session_Attribute_Name,
+				new Device(DEVICE_CLASS.SEVENPLUS, "Tablet Browser"));
+		request.getSession().setAttribute(
+				LOGGED_IN_CUSTOMER_SESSION_ATTRIBUTE_NAME,
+				"_Global.LoggedInCustomer");
+		request.getSession().setAttribute(EDocsConstants.EDOCS_SAMLNAVIGATION,
+				true);
+		request.setAttribute(LandingSequenceConstants.SPLASH_ENABLED,
+				"SPLASH_ENABLED");
+		request.getSession().setAttribute(
+				InLanguageUtil.CUSTOMER_LANGUAGE_CODE, "ENGLISH");
+
+		// Mock EventRegistry
+		EventRegistry eventRegistry = Mockito.spy(EventRegistry.class);
+		BusinessEventBuilder businessEventBuilder = (BusinessEventBuilder) applicationContext
+				.getBean("businessEventJAXBBuilder");
+		applicationContext.overrideBean("businessEventBuilder",
+				businessEventBuilder);
+		BusinessEventManager businessEventManager = Mockito
+				.spy(BusinessEventManager.class);
+		ReflectionTestUtils.setField(businessEventManager, "bevMQTabConnector",
+				null);
+		ReflectionTestUtils.setField(businessEventManager,
+				"businessEventBuilder", businessEventBuilder);
+		ReflectionTestUtils.setField(businessEventManager, "publishSwitch",
+				"false");
+
+		eventRegistry.setBusinessEventManager(businessEventManager);
+		eventRegistry
+				.setBusinessEventThreadPoolExecutor(businessEventThreadPoolExecutor);
+
+		applicationContext.overrideBean("eventRegistry", eventRegistry);
+		// Mock InBoundNavigationService
+		DeviceInfo deviceInfo = DeviceInfoFactory.buildDeviceInfo();
+		mockInboundNavigationService(deviceInfo);
+
+		// Mock SetupOnlineBankingSession
+		SetupOnlineBankingResponseTO responseTO = SetupOnlineBankingResponseTOFactory
+				.buildSetupOnlineBankingResponseTO(true);
+		SetupOnlineBankingSession setupOnlineBankingSession = Mockito
+				.mock(SetupOnlineBankingSession.class);
+		applicationContext.overrideBean("setupOnlineBankingSession",
+				setupOnlineBankingSession);
+		Mockito.when(
+				setupOnlineBankingSession.setup(
+						Matchers.any(InboundNavigationResponseTO.class),
+						Matchers.any(TrackingDetailsTO.class),
+						Matchers.any(java.util.prefs.Preferences.class),
+						Matchers.anyBoolean(), Matchers.anyBoolean(),
+						Matchers.anyBoolean())).thenReturn(responseTO);
+
+		// Mock PushNotificationsService
+		mockPushNotificationsService();
+
+		// Mock InterruptiveMessageService
+		mockInterruptiveMessageService();
+
+		// Fire the request
+		ModelAndView modelAndView = controller.start(request, response);
+
+		// -------------------Assert the
+		// outputs----------------------------------
+
+		// modelandView should not be null
+		assertNotNull(modelAndView);
+
+		// view name should be "startview"
+		assertEquals(modelAndView.getViewName(), "startview");
+		setUpAndAssertionsForDigitaleventLogCheck();
+	}
+	
+	/**
+	 * Builds the Controller object and sets it's dependencies.
+	 * 
+	 * @return
+	 */
+	private LandingController buildLandingController() {
+
+		LandingController controller = new LandingController();
+		PresentationServices presentationServices = new PresentationServices(
+				(DomainServices) applicationContext.getBean("domainServices"),
+				(BusinessServices) applicationContext
+						.getBean("businessServices"),
+				(BaseServices) applicationContext.getBean("baseServices"));
+		presentationServices.setApplicationContext(applicationContext);
+		controller.setPresentationServices(presentationServices);
+		return controller;
+	}
+
+	private void mockInboundNavigationService(DeviceInfo deviceInfo)
+			throws EnhancedException {
+		// Mocking the InBoundNavigationService, and setting the mocked response
+		// to InboundNavigationResponseTO
+		inboundNavigationResponseTO = InboundNavigationResponseTOFactory
+				.buildInboundNavigationResponseTO(deviceInfo); // factory
+																// creation in
+																// progress
+		InBoundNavigationService inBoundNavigationService = Mockito
+				.mock(InBoundNavigationService.class);
+		applicationContext.overrideBean("inBoundService",
+				inBoundNavigationService);
+		Mockito.when(
+				inBoundNavigationService.buildNavigation(Matchers
+						.any(InboundNavigationRequestTO.class))).thenReturn(
+				inboundNavigationResponseTO);
+	}
+
+	@SuppressWarnings("unchecked")
+	private void mockInterruptiveMessageService() {
+		// InterruptiveMessageService mock responses
+		InterruptiveMessageTO interruptiveMessageTO = InterruptiveMessageTOFactory
+				.buildInterruptiveMessageTO(ImType.MARKETING, "splash1");
+
+		InterruptiveMessageService intSvc = Mockito
+				.mock(InterruptiveMessageService.class);
+		// intSvc.setDomainServices(businessServices);
+		applicationContext.overrideBean(InterruptiveMessageService.INT_MSG_SVC,
+				intSvc);
+
+		Mockito.when(
+				intSvc.calculateSplash(Matchers.any(Map.class),
+						Matchers.any(ContentFinderNew.class),
+						Matchers.any(Device.class),
+						Matchers.any(DomainServices.class))).thenReturn(
+				interruptiveMessageTO);
+	}
+
+	private void mockPushNotificationsService() {
+		// pushNotificationsService mock responses
+		PushNotificationsService pushNotificationsService = Mockito
+				.mock(PushNotificationsService.class);
+		applicationContext.overrideBean("pushNotificationsService",
+				pushNotificationsService);
+		Mockito.when(
+				pushNotificationsService.isCustomerDevicePushEnabled(Matchers
+						.any(InboundNavigationResponseTO.class))).thenReturn(
+				false);
+	}
+
+	@SuppressWarnings({ "unchecked", "rawtypes" })
+	private void setUpAndAssertionsForDigitaleventLogCheck()
+			throws InterruptedException {
+		// START of DigitalEvent Log Test SetUp
+		// Setting up logger
+		Logger logger = (Logger) LoggerFactory
+				.getLogger("com.platformx.secure.connect.bev.builder.BusinessEventJAXBBuilder");
+		// BEV Builder log filter
+		// Captor is generalized with
+		// ch.qos.logback.classic.spi.LoggingEvent
+		ArgumentCaptor<LoggingEvent> captorLoggingEvent = ArgumentCaptor
+				.forClass(LoggingEvent.class);
+
+		// Spy Log Appenders
+		Appender<ILoggingEvent> mockAppender = Mockito.spy(Appender.class);
+
+		// Store the filtered loggEvents
+		List<LoggingEvent> loggingEvent = null;
+
+		Mockito.when(mockAppender.getName()).thenReturn("BEVEVENTMOCK");
+
+		// Add appender to the logger
+		logger.addAppender(mockAppender);
+		Callable runnable = Mockito.mock(Callable.class);
+		// END of DigitalEvent Log Test SetUp // Validation of the future
+		// Task: Start // For calling the thread ExecutorService
+		Mockito.doAnswer(new Answer<Object>() {
+			public Object answer(InvocationOnMock invocation) throws Exception {
+				((Callable) invocation).call();
+				return null;
+			}
+		}).when(businessEventThreadPoolExecutor).submit(runnable);
+		//Thread.sleep(10000);
+		TimeUnit.SECONDS.sleep(1);
+
+		// Instantiate loggingevent to capture the log events
+		try {
+			Mockito.verify(mockAppender, Mockito.atLeastOnce()).doAppend(
+					captorLoggingEvent.capture());
+		} catch (Exception e) {
+			fail("Successfull Digital Events Log expected but not available");
+		}
+
+		// Having a generalized captor means we don't need to cast
+		loggingEvent = captorLoggingEvent.getAllValues();
+		// Validation of the future Task: End
+		assertNotNull("loggingEvent cant be null", loggingEvent);
+		// Iterate through the log
+		Iterator<LoggingEvent> itr = loggingEvent.iterator();
+		while (itr.hasNext()) {
+			LoggingEvent event = itr.next();
+			// BEV Events logs are logged as INFO
+			if (event.getLevel().equals(Level.INFO)) {
+				// BEV Events logs are logged starting with 'Business Event xml'
+				// And there can be multiple events fired for a businees logic.
+				// Select the one which contains CGISessionLogin (BEV 28)
+				if (event.getFormattedMessage().trim()
+						.startsWith("Business Event xml")
+						&& event.getFormattedMessage().trim()
+								.contains("<bos:implementationName>CGISessionLogin</bos:implementationName>")) {
+					filteredLoggingEvents.add(event.getFormattedMessage()
+							.trim().replaceAll("Business Event xml ", ""));
+				}
+			}
+		}
+		String expectedData = filteredLoggingEvents.get(0).trim();
+		System.out.println(expectedData);
+		Map<String, String> env = System.getenv();
+		assertTrue("AUTOLOGIN is incorrect",
+				expectedData.contains("<AUTOLOGIN>None</AUTOLOGIN>"));
+		assertTrue("BROWSER is incorrect", expectedData.contains("<BROWSER"));
+		assertTrue("CHANNEL is incorrect",
+				expectedData.contains("<CHANNEL>0055</CHANNEL>"));
+		assertTrue("CUST_BRAND is incorrect",
+				expectedData
+						.contains("<CUST_BRAND>WB_Test_userBrand</CUST_BRAND>"));
+		assertTrue(
+				"CUST_IP_ADDRESS is incorrect",
+				expectedData
+						.contains("<CUST_IP_ADDRESS>127.0.0.1</CUST_IP_ADDRESS>"));
+		assertTrue(
+				"HOST_NAME is incorrect",
+				expectedData.contains("<HOST_NAME>" + env.get("COMPUTERNAME")
+						+ "</HOST_NAME>"));
+		assertTrue(
+				"NAVIGATIONORIGIN is incorrect",
+				expectedData
+						.contains("<NAVIGATIONORIGIN>LoginApp</NAVIGATIONORIGIN>"));
+		assertTrue("SELECTION is incorrect",
+				expectedData.contains("<SELECTION>Account Summary</SELECTION>"));
+		assertTrue("SESSION_ID is incorrect",
+				expectedData.contains("<SESSION_ID>"));
+		assertTrue("SIGNON_PATH is incorrect",
+				expectedData.contains("<SIGNON_PATH>Password</SIGNON_PATH>"));
+		assertTrue(
+				"UNITOFWORK is incorrect",
+				expectedData
+						.contains("<UNITOFWORK>WB_Test_unitOfWorkId</UNITOFWORK>"));
+		assertTrue("WFACOOKIE is incorrect",
+				expectedData.contains("<WFACOOKIE"));
+		assertTrue("AUTHUSER_ECN is incorrect",
+				expectedData.contains("<AUTHUSER_ECN>600310659</AUTHUSER_ECN>"));
+		assertTrue("XAID is incorrect",
+				expectedData.contains("<XAID>1234</XAID>"));
+	}
+
+}

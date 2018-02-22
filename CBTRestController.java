@@ -1,4 +1,4 @@
-package com.wellsfargo.cbtrest.controller;
+package com.prakavi.cbtrest.controller;
 
 import javax.inject.Inject;
 import javax.ws.rs.Consumes;
@@ -9,9 +9,9 @@ import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.UriInfo;
 
-import com.wellsfargo.cbtrest.model.CBTRequest;
-import com.wellsfargo.cbtrest.model.CBTResponse;
-import com.wellsfargo.cbtrest.service.CBTService;
+import com.prakavi.cbtrest.model.CBTRequest;
+import com.prakavi.cbtrest.model.CBTResponse;
+import com.prakavi.cbtrest.service.CBTService;
 import com.wordnik.swagger.annotations.Api;
 import com.wordnik.swagger.annotations.ApiOperation;
 import com.wordnik.swagger.annotations.ApiParam;
